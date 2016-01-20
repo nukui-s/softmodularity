@@ -21,7 +21,8 @@ class SoftMod(object):
         deg = {n: 0 for n in xrange(nn)}
         for n1, n2 in elist:
             deg[n1] += weights[n1]
-        self.degrees = sorted(deg.values())
+            deg[n2] += weights[n2]
+        self.degrees = [v for _, v in sorted(deg.items())]
         self.learning_rate = learning_rate
         self.lambda_phi = lambda_phi
         self.threads = threads
@@ -41,16 +42,18 @@ class SoftMod(object):
                 break
             pre_loss = loss
         mod = sess.run(self.mod)
+        theta = sess.run(self.Theta)
         print("Modularity:", mod)
         print("Loss:", loss)
-        return mod
+        return theta, mod
 
     def get_soft_community(self):
         Theta = self.sess.run(self.Theta)
         return Theta
 
-    def get_hard_communirty(self):
-        Theta = self.sess.run(self.Theta)
+    def get_hard_communirty(self, Theta=None):
+        if Theta is None:
+            Theta = self.sess.run(self.Theta)
         hard_com = np.argmax(Theta, axis=1)
         return hard_com
 
@@ -66,7 +69,7 @@ class SoftMod(object):
     def _setup_graph(self):
         self.graph = tf.Graph()
         with self.graph.as_default():
-            elist = self.edge_list + self.edge_list
+            elist = self.edge_list + [(j, i) for i, j in self.edge_list]
             weights = np.append(self.weights, self.weights)
             sum_weight = self.sum_weight
             nn = self.n_node
@@ -76,25 +79,28 @@ class SoftMod(object):
             lambda_phi = self.lambda_phi
 
             with tf.name_scope("adj_mat"):
-                X = tf.sparse_to_dense(sparse_values=weights,
+                self.X = X = tf.sparse_to_dense(sparse_values=weights,
                                        sparse_indices=elist,
                                        output_shape=[nn, nn])
 
             K = tf.constant(deg, shape=[nn,1], name="deg_vec")
-            K_2 = tf.matmul(K, K, transpose_b=True)
+            self.K_2 = K_2 = tf.matmul(K, K, transpose_b=True)
             sum_weight = tf.constant(sum_weight, name="sum_weight")
 
-            initializer = tf.random_uniform_initializer()
+            initializer = tf.random_normal_initializer(mean=0.0, stddev=0.1)
             self.Phi = Phi = tf.get_variable(name="Phi", shape=[nn, nc],
                                              initializer=initializer)
 
-            self.Theta = Theta = tf.nn.softmax(Phi, name="Theta")
-            Theta_2 = tf.matmul(Theta, Theta, transpose_b=True)
+            Phi_2 = tf.pow(Phi, 2)
+            #Phi_2 = tf.log(1+tf.exp(tf.pow(Phi, 2)))
+            with tf.name_scope("Theta"):
+                self.Theta = Theta = self.normalize_along_row(Phi_2)
+            self.Theta_2 = Theta_2 = tf.matmul(Theta, Theta, transpose_b=True)
 
             mod = tf.reduce_sum((X - (K_2 / (2*sum_weight)))*Theta_2) / \
                                 (2*sum_weight)
             self.mod = mod
-            self.phi_norm = phi_norm = tf.nn.l2_loss(Phi)/nn
+            self.phi_norm = phi_norm = tf.reduce_sum(Phi_2) / nn
             self.loss = loss = -mod + lambda_phi*phi_norm
             self.opt_op = tf.train.AdamOptimizer(lr).minimize(loss)
 
@@ -117,3 +123,8 @@ class SoftMod(object):
             config = tf.ConfigProto(inter_op_parallelism_threads=self.threads,
                                     intra_op_parallelism_threads=self.threads)
             self.sess = tf.Session(config=config)
+
+    @staticmethod
+    def normalize_along_row(input_):
+        rowsum = tf.expand_dims(tf.reduce_sum(input_, 1), 1)
+        return input_ / rowsum
